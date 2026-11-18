@@ -1,0 +1,102 @@
+name: Build Selected Version APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: '要编译的分支、Tag 或 Commit ID，例如 master、v1.2.0、a1b2c3d'
+        required: true
+        default: 'master-3'
+        type: string
+      java_version:
+        description: 'JDK 版本。旧项目优先 11，当前 master-3 使用 17'
+        required: true
+        default: '17'
+        type: choice
+        options:
+          - '8'
+          - '11'
+          - '17'
+      build_type:
+        description: '构建类型'
+        required: true
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout selected version
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref }}
+          fetch-depth: 0
+
+      - name: Show selected revision
+        run: |
+          echo "Requested ref: ${{ inputs.git_ref }}"
+          git log -1 --oneline --decorate
+
+      - name: Set up selected JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java_version }}
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses >/dev/null || true
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x ./gradlew
+
+      - name: Show environment
+        run: |
+          java -version
+          ./gradlew --version
+
+      - name: Build selected version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.build_type }}" = "release" ]; then
+            ./gradlew --no-daemon --stacktrace clean assembleRelease
+          else
+            ./gradlew --no-daemon --stacktrace clean assembleDebug
+          fi
+
+      - name: Collect APK files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          mapfile -t apks < <(find app/build/outputs/apk -type f -name '*.apk' | sort)
+          if [ "${#apks[@]}" -eq 0 ]; then
+            echo 'No APK was generated.' >&2
+            exit 1
+          fi
+          safe_ref="$(echo '${{ inputs.git_ref }}' | tr '/: ' '---')"
+          for apk in "${apks[@]}"; do
+            cp "$apk" "dist/FiveGSwitcher-${safe_ref}-${{ inputs.build_type }}-$(basename "$apk")"
+          done
+          sha256sum dist/*.apk | tee dist/SHA256SUMS.txt
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FiveGSwitcher-${{ inputs.git_ref }}-${{ inputs.build_type }}-${{ github.run_number }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
